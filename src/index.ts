@@ -28,6 +28,10 @@ enum EventType {
 }
 
 export interface AttachEvent {
+  // Linux/X11 contract: these bounds are authoritative physical X11
+  // virtual-desktop pixels (integers). They are directly comparable with
+  // global mouse hook coordinates (e.g. uiohook) without CSS/DIP conversion.
+  // On Windows/macOS, existing platform behavior is unchanged.
   hasAccess: boolean | undefined
   isFullscreen: boolean | undefined
   x: number
@@ -41,6 +45,10 @@ export interface FullscreenEvent {
 }
 
 export interface MoveresizeEvent {
+  // Linux/X11 contract: these bounds are authoritative physical X11
+  // virtual-desktop pixels (integers). They are directly comparable with
+  // global mouse hook coordinates (e.g. uiohook) without CSS/DIP conversion.
+  // On Windows/macOS, existing platform behavior is unchanged.
   x: number
   y: number
   width: number
@@ -72,8 +80,12 @@ export const OVERLAY_WINDOW_OPTS: BrowserWindowConstructorOptions = {
 class OverlayControllerGlobal {
   private isInitialized = false
   private electronWindow?: BrowserWindow
-  // Exposed so that apps can get the current bounds of the target
-  // NOTE: stores screen physical rect on Windows
+  // Exposed so that apps can get the current bounds of the target.
+  // Linux/X11: values come from authoritative X11 geometry and are physical
+  // virtual-desktop pixels (integer x/y/width/height). Compare directly with
+  // global mouse hooks like uiohook; no CSS/DIP conversion is applied.
+  // Windows: stores a screen physical rect and is converted to DIP only when
+  // applying bounds to Electron via screen.screenToDipRect.
   targetBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 }
   targetHasFocus = false
   private focusNext: 'overlay' | 'target' | undefined

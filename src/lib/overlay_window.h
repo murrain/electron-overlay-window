@@ -25,6 +25,11 @@ enum ow_event_type {
 };
 
 struct ow_window_bounds {
+  /* Linux/X11 export contract for attach/moveresize events:
+   * x/y/width/height are authoritative X11 virtual-desktop coordinates in
+   * physical pixels (integers), suitable for direct comparison with global
+   * mouse hook positions (e.g. uiohook) without CSS/DIP conversion.
+   */
   int32_t x;
   int32_t y;
   uint32_t width;
