@@ -25,3 +25,24 @@ Supported backends:
 Recommended dev utils
 - Windows: AccEvent (accevent.exe) and Inspect Object (inspect.exe) from Windows SDK
 - X11: xwininfo, xprop, xev
+
+
+## Linux/X11 geometry contract
+
+For Linux/X11, `attach` and `moveresize` event bounds are exported in **authoritative X11 virtual-desktop physical pixels** (`x`, `y`, `width`, `height` integers).
+
+This means downstream apps should:
+- compare these bounds directly with global mouse hook coordinates (for example, from `uiohook`), and
+- avoid Chromium renderer coordinates like `window.screenX/screenY` for hit-testing/activation logic on multi-monitor X11/XWayland setups.
+
+No CSS/DIP conversion is applied to Linux/X11 bounds on this API path.
+
+### Optional diagnostics
+
+Set `OVERLAY_WINDOW_DEBUG_GEOMETRY=1` to emit low-noise native logs at:
+- hook start,
+- attach export,
+- moveresize export.
+
+Each line includes geometry source, unit space, and exported bounds.
+
