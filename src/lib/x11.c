@@ -293,6 +293,17 @@ static void hook_proc(xcb_generic_event_t* generic_event) {
     }
     return;
   }
+  if (generic_event->response_type == XCB_ENTER_NOTIFY) {
+    xcb_enter_notify_event_t* event = (xcb_enter_notify_event_t*)generic_event;
+    if (event->event == overlay_info.window_id &&
+        event->mode == XCB_NOTIFY_MODE_NORMAL) {
+      struct ow_event e = {
+        .type = OW_INPUT_ENTER,
+      };
+      ow_emit_event(&e);
+    }
+    return;
+  }
 }
 
 static void hook_thread(void* _arg) {
@@ -322,6 +333,9 @@ static void hook_thread(void* _arg) {
     // this override-redirect is being set before window is mapped.
     uint32_t values[] = {1};
     xcb_change_window_attributes(x_conn, overlay_info.window_id, XCB_CW_OVERRIDE_REDIRECT, values);
+
+    uint32_t overlay_mask[] = { XCB_EVENT_MASK_ENTER_WINDOW };
+    xcb_change_window_attributes(x_conn, overlay_info.window_id, XCB_CW_EVENT_MASK, overlay_mask);
   }
 
   // listen for `_NET_ACTIVE_WINDOW` changes
