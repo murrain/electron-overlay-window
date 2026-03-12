@@ -25,6 +25,7 @@ enum EventType {
   EVENT_DETACH = 4,
   EVENT_FULLSCREEN = 5,
   EVENT_MOVERESIZE = 6,
+  EVENT_INPUT_ENTER = 7,
 }
 
 export interface AttachEvent {
@@ -217,6 +218,9 @@ class OverlayControllerGlobal {
         break
       case EventType.EVENT_MOVERESIZE:
         this.events.emit('moveresize', e)
+        break
+      case EventType.EVENT_INPUT_ENTER:
+        this.events.emit('input-enter')
         break
     }
   }

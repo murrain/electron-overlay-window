@@ -22,6 +22,8 @@ enum ow_event_type {
   OW_FULLSCREEN,
   // target window changed position or resized
   OW_MOVERESIZE,
+  // pointer entered an overlay input region on X11
+  OW_INPUT_ENTER,
 };
 
 struct ow_window_bounds {
