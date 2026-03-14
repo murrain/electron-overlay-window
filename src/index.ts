@@ -100,6 +100,9 @@ class OverlayControllerGlobal {
   // session. Also suppresses overlay hide-on-blur so that EnterNotify events
   // can fire for input-enter reactivation.
   private usingInputRegions = false
+  // Last regions passed to setInputRegions, re-applied on overlay focus to
+  // recover from transient native errors without requiring a session restart.
+  private lastInputRegions: Array<{x: number, y: number, width: number, height: number}> = []
 
   readonly events = new EventEmitter()
 
@@ -275,6 +278,14 @@ class OverlayControllerGlobal {
     // mask controls which areas accept input, not setIgnoreMouseEvents.
     this.setIgnoreMouseEvents(false)
     if (isLinux) {
+      // Re-assert the last-known input regions before activating. This
+      // ensures the shape mask is current even if a prior native call
+      // failed silently or the compositor reset the mask during a focus
+      // transition. Always re-assert when in shape-mask mode, even if
+      // the region list is empty (full click-through).
+      if (this.usingInputRegions) {
+        lib.setInputRegions(this.lastInputRegions)
+      }
       lib.activateOverlay()
     } else {
       this.electronWindow.focus()
@@ -327,8 +338,12 @@ class OverlayControllerGlobal {
    */
   setInputRegions (regions: Array<{x: number, y: number, width: number, height: number}>) {
     if (isLinux) {
-      this.usingInputRegions = true
       lib.setInputRegions(regions)
+      // Latch after the native call succeeds. If it throws, we avoid the
+      // broken hybrid state where setIgnoreMouseEvents is suppressed but
+      // no shape mask was actually applied.
+      this.usingInputRegions = true
+      this.lastInputRegions = [...regions]
     }
   }
 
