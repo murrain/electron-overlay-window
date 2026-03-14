@@ -95,7 +95,10 @@ class OverlayControllerGlobal {
   private attachOptions: AttachOptions = {}
   // When true, X11 input shape masks control which regions of the overlay
   // accept mouse input. Electron's setIgnoreMouseEvents is skipped to avoid
-  // overriding the shape mask. Set automatically when setInputRegions is called.
+  // overriding the shape mask. One-way: set on the first setInputRegions call
+  // and never cleared — once shape-mask mode is active, it persists for the
+  // session. Also suppresses overlay hide-on-blur so that EnterNotify events
+  // can fire for input-enter reactivation.
   private usingInputRegions = false
 
   readonly events = new EventEmitter()
@@ -141,7 +144,11 @@ class OverlayControllerGlobal {
     this.events.on('blur', () => {
       this.targetHasFocus = false
 
-      if (this.electronWindow && (isMac ||
+      // When using X11 input regions, keep the overlay window mapped so that:
+      // 1. The shape mask stays active (clicks outside widgets pass through)
+      // 2. EnterNotify events can fire for input-enter reactivation
+      // The overlay is hidden on 'detach' (game closed) regardless.
+      if (this.electronWindow && !this.usingInputRegions && (isMac ||
         this.focusNext !== 'overlay' && !this.electronWindow.isFocused()
       )) {
         this.electronWindow.hide()
@@ -291,7 +298,7 @@ class OverlayControllerGlobal {
     this.electronWindow = electronWindow
 
     this.electronWindow?.on('blur', () => {
-      if (!this.targetHasFocus && this.focusNext !== 'target') {
+      if (!this.targetHasFocus && this.focusNext !== 'target' && !this.usingInputRegions) {
         this.electronWindow!.hide()
       }
     })
