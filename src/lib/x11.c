@@ -5,19 +5,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <xcb/xcb.h>
-#include <xcb/shape.h>
 #include "overlay_window.h"
-
-_Static_assert(sizeof(struct ow_input_rect) == sizeof(xcb_rectangle_t),
-  "ow_input_rect must be layout-compatible with xcb_rectangle_t");
-_Static_assert(offsetof(struct ow_input_rect, x) == offsetof(xcb_rectangle_t, x),
-  "ow_input_rect.x offset mismatch");
-_Static_assert(offsetof(struct ow_input_rect, y) == offsetof(xcb_rectangle_t, y),
-  "ow_input_rect.y offset mismatch");
-_Static_assert(offsetof(struct ow_input_rect, width) == offsetof(xcb_rectangle_t, width),
-  "ow_input_rect.width offset mismatch");
-_Static_assert(offsetof(struct ow_input_rect, height) == offsetof(xcb_rectangle_t, height),
-  "ow_input_rect.height offset mismatch");
 
 static xcb_connection_t* x_conn;
 static pthread_mutex_t x_conn_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -44,6 +32,8 @@ struct ow_overlay_window
 
 static xcb_window_t active_window = XCB_WINDOW_NONE;
 
+// Gated behind OVERLAY_WINDOW_DEBUG_GEOMETRY env var.
+// When enabled, writes native-layer debug output to /tmp/eow-native.log.
 static bool geometry_debug_enabled() {
   static int cached = -1;
   if (cached == -1) {
@@ -52,6 +42,18 @@ static bool geometry_debug_enabled() {
   }
   return cached == 1;
 }
+
+static FILE* eow_log = NULL;
+static void eow_log_init() {
+  if (eow_log) return;
+  if (!geometry_debug_enabled()) return;
+  eow_log = fopen("/tmp/eow-native.log", "a");
+  if (eow_log) {
+    setvbuf(eow_log, NULL, _IOLBF, 0); // line-buffered
+    fprintf(eow_log, "[eow:x11] === log opened ===\n");
+  }
+}
+#define EOW_LOG(...) do { eow_log_init(); if (eow_log) fprintf(eow_log, __VA_ARGS__); } while(0)
 
 static void log_geometry_bounds(const char* stage, const struct ow_window_bounds* bounds) {
   if (!geometry_debug_enabled()) return;
@@ -67,12 +69,16 @@ static struct ow_target_window target_info = {
   .window_id = XCB_WINDOW_NONE,
   .is_focused = false,
   .is_destroyed = false,
-  .is_fullscreen = false // initial state of *overlay* window
+  .is_fullscreen = false // initial state of target/game window
 };
 
 static struct ow_overlay_window overlay_info = {
   .window_id = XCB_WINDOW_NONE
 };
+
+// Forward declaration — defined after ow_start_hook.
+static void restack_overlay_above_target();
+
 
 static xcb_window_t get_active_window() {
   xcb_get_property_reply_t* prop_reply = xcb_get_property_reply(x_conn, xcb_get_property(x_conn, 0, root, ATOM_NET_ACTIVE_WINDOW, XCB_ATOM_WINDOW, 0, 1), NULL);
@@ -150,6 +156,12 @@ static void handle_moveresize_xevent(struct ow_target_window* target_info) {
   if (get_content_bounds(target_info->window_id, &bounds)) {
     log_geometry_bounds("moveresize-export", &bounds);
 
+    // Only restack when the game is focused. During alt-tab, the game may
+    // emit ConfigureNotify events which would undo lower_overlay_below_target().
+    if (target_info->is_focused) {
+      restack_overlay_above_target();
+    }
+
     struct ow_event e = {
       .type = OW_MOVERESIZE,
       .data.moveresize = {
@@ -165,6 +177,9 @@ static void handle_fullscreen_xevent(struct ow_target_window* target_info) {
   if (is_fullscreen_window(target_info->window_id, &is_fullscreen)) {
     if (is_fullscreen != target_info->is_fullscreen) {
       target_info->is_fullscreen = is_fullscreen;
+      if (target_info->is_focused) {
+        restack_overlay_above_target();
+      }
       struct ow_event e = {
         .type = OW_FULLSCREEN,
         .data.fullscreen = {
@@ -180,7 +195,11 @@ static void check_and_handle_window(xcb_window_t wid, struct ow_target_window* t
   if (target_info->window_id != XCB_WINDOW_NONE) {
     if (target_info->window_id != wid) {
       if (target_info->is_focused) {
+        EOW_LOG("[eow:x11] check_and_handle: game BLUR (active=%u, target=%u)\n",
+          wid, target_info->window_id);
+
         target_info->is_focused = false;
+
         struct ow_event e = { .type = OW_BLUR };
         ow_emit_event(&e);
       }
@@ -195,7 +214,9 @@ static void check_and_handle_window(xcb_window_t wid, struct ow_target_window* t
     }
     else if (target_info->window_id == wid) {
       if (!target_info->is_focused) {
+        EOW_LOG("[eow:x11] check_and_handle: game FOCUS\n");
         target_info->is_focused = true;
+        restack_overlay_above_target();
         struct ow_event e = { .type = OW_FOCUS };
         ow_emit_event(&e);
       }
@@ -246,6 +267,7 @@ static void check_and_handle_window(xcb_window_t wid, struct ow_target_window* t
     ow_emit_event(&e);
 
     target_info->is_focused = true;
+    restack_overlay_above_target();
     e.type = OW_FOCUS;
     ow_emit_event(&e);
   } else {
@@ -275,6 +297,9 @@ static void hook_proc(xcb_generic_event_t* generic_event) {
     if (event->window == root && event->atom == ATOM_NET_ACTIVE_WINDOW) {
       xcb_window_t old_active = active_window;
       active_window = get_active_window();
+
+      EOW_LOG("[eow:x11] _NET_ACTIVE_WINDOW changed: %u -> %u (target=%u overlay=%u)\n",
+        old_active, active_window, target_info.window_id, overlay_info.window_id);
 
       if (old_active != target_info.window_id) {
         uint32_t mask[] = { XCB_EVENT_MASK_NO_EVENT };
@@ -307,6 +332,8 @@ static void hook_proc(xcb_generic_event_t* generic_event) {
 }
 
 static void hook_thread(void* _arg) {
+  eow_log_init();
+  EOW_LOG("[eow:x11] hook_thread started\n");
   x_conn = xcb_connect(NULL, NULL);
   xcb_screen_t* screen = xcb_setup_roots_iterator(xcb_get_setup(x_conn)).data;
   root = screen->root;
@@ -329,8 +356,8 @@ static void hook_thread(void* _arg) {
   free(atom_reply);
 
   if (overlay_info.window_id != XCB_WINDOW_NONE) {
-    // Electron window is created with `show: false`,
-    // this override-redirect is being set before window is mapped.
+    // Override-redirect bypasses the window manager so the overlay won't
+    // appear in taskbar/pagers. Set before window is mapped (show: false).
     uint32_t values[] = {1};
     xcb_change_window_attributes(x_conn, overlay_info.window_id, XCB_CW_OVERRIDE_REDIRECT, values);
 
@@ -376,28 +403,33 @@ void ow_start_hook(char* target_window_title, void* overlay_window_id) {
   uv_thread_create(&hook_tid, hook_thread, NULL);
 }
 
+// Place the overlay window directly above the target in the X11 stacking
+// order. Other windows the user brings forward will naturally sit above both.
+// Internal callers (hook_proc) inherit x_conn_mutex from the event loop;
+// external callers (ow_activate_overlay) must acquire it explicitly.
+static void restack_overlay_above_target() {
+  if (overlay_info.window_id == XCB_WINDOW_NONE ||
+      target_info.window_id == XCB_WINDOW_NONE) return;
+
+  EOW_LOG("[eow:x11] restack: overlay ABOVE target\n");
+  uint32_t values[] = { target_info.window_id, XCB_STACK_MODE_ABOVE };
+  xcb_configure_window(x_conn, overlay_info.window_id,
+    XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE, values);
+}
+
+// Restack overlay above the game. No keyboard grab, no focus change.
+// Keyboard dismissal is handled by uiohook in the JS layer.
 void ow_activate_overlay() {
-  if (overlay_info.window_id == XCB_WINDOW_NONE) return;
-
   pthread_mutex_lock(&x_conn_mutex);
+  EOW_LOG("[eow:x11] ow_activate_overlay: restack overlay above game\n");
+  restack_overlay_above_target();
 
-  // Send _NET_ACTIVE_WINDOW to ask the WM to activate our overlay.
-  // Even though the overlay is override-redirect (unmanaged), the WM
-  // typically processes this far enough to send FocusOut to the
-  // currently active window. This causes SDL2/Wine to release any
-  // active XGrabPointer, allowing the overlay to receive mouse clicks.
-  //
-  // data32[1] (timestamp) is intentionally 0: no user-event timestamp
-  // is available at this call site. data32[2] (requestor's current
-  // active window) is intentionally 0: we don't track this here.
-  // If a WM rejects the message due to focus-steal prevention,
-  // xcb_set_input_focus below still handles keyboard focus (no regression).
   xcb_client_message_event_t msg = {0};
   msg.response_type = XCB_CLIENT_MESSAGE;
   msg.type = ATOM_NET_ACTIVE_WINDOW;
   msg.window = overlay_info.window_id;
   msg.format = 32;
-  msg.data.data32[0] = 2; // source indication: pager
+  msg.data.data32[0] = 2;
 
   xcb_send_event(x_conn, 0, root,
     XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY | XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT,
@@ -405,44 +437,15 @@ void ow_activate_overlay() {
 
   xcb_set_input_focus(x_conn, XCB_INPUT_FOCUS_PARENT, overlay_info.window_id, XCB_CURRENT_TIME);
   xcb_flush(x_conn);
-
   pthread_mutex_unlock(&x_conn_mutex);
 }
 
 void ow_focus_target() {
   if (target_info.window_id == XCB_WINDOW_NONE) return;
 
+  EOW_LOG("[eow:x11] ow_focus_target: focusing game=%u\n", target_info.window_id);
   pthread_mutex_lock(&x_conn_mutex);
   xcb_set_input_focus(x_conn, XCB_INPUT_FOCUS_PARENT, target_info.window_id, XCB_CURRENT_TIME);
-  xcb_flush(x_conn);
-  pthread_mutex_unlock(&x_conn_mutex);
-}
-
-void ow_set_input_regions(struct ow_input_rect* rects, uint32_t count) {
-  // x_conn is initialized by hook_thread before overlay_info.window_id
-  // is ever set, so the window_id guard below is a sufficient proxy for
-  // "x_conn is ready". Do not call this function before OW_ATTACH is received.
-  // Specifically: hook_thread sets x_conn via xcb_connect() at its very
-  // first line, then flushes before any event is processed. The JS layer
-  // only receives OW_ATTACH after hook_thread has completed setup, so
-  // the invariant (x_conn != NULL) iff (window_id != XCB_WINDOW_NONE) holds.
-  if (overlay_info.window_id == XCB_WINDOW_NONE) return;
-
-  pthread_mutex_lock(&x_conn_mutex);
-  /*
-   * Set the input shape to exactly the given rectangles. When count == 0
-   * this sets an empty shape, meaning the window receives no input at all
-   * and all clicks pass through to the window below. This is the correct
-   * behavior for an overlay with no visible widgets.
-   *
-   * Note: xcb_shape_mask with XCB_PIXMAP_NONE would *remove* the input
-   * shape entirely, restoring full-window input — the opposite of what
-   * we want. We intentionally always use xcb_shape_rectangles so that
-   * an empty list means "accept nothing" rather than "accept everything".
-   */
-  xcb_shape_rectangles(x_conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT,
-    XCB_CLIP_ORDERING_UNSORTED, overlay_info.window_id, 0, 0,
-    count, (xcb_rectangle_t*)rects);
   xcb_flush(x_conn);
   pthread_mutex_unlock(&x_conn_mutex);
 }

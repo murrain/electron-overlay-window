@@ -29,7 +29,7 @@
           ],
           'link_settings': {
             'libraries': [
-              '-lxcb', '-lxcb-shape', '-lpthread'
+              '-lxcb', '-lpthread'
             ]
           },
           'cflags': ['-std=c11', '-pedantic', '-Wall', '-pthread'],
